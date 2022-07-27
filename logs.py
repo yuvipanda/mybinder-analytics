@@ -12,6 +12,7 @@ import sys
 import asyncio
 import typing
 
+
 class LogRecord(typing.NamedTuple):
     """
     Structured log entry coming out of dataflow.
@@ -115,8 +116,6 @@ async def get_job_logs(job_id, source_filter: typing.List, instance_filter: typi
     stdout, _ = await proc.communicate()
     logs = json.loads(stdout.decode())
 
-    last_seen_ts = None
-
     for l in logs:
         timestamp = isoparse(l['timestamp'])
 
@@ -145,12 +144,9 @@ async def get_job_logs(job_id, source_filter: typing.List, instance_filter: typi
             instance = l['labels']['compute.googleapis.com/resource_name']
         else:
             instance = None
-        last_seen_ts = timestamp
         # Trim additional newlines to prevent excess blank lines
-        print(LogRecord(timestamp, source, message.rstrip(), instance))
+        yield LogRecord(timestamp, source, message.rstrip(), instance)
 
-    # Return timestamp of last messag
-    return last_seen_ts
 
 async def main():
     argparser = argparse.ArgumentParser()
@@ -167,11 +163,15 @@ async def main():
     last_ts = None
 
     while True:
-        last_seen_ts = await get_job_logs(job.id, args.source, args.instance, last_ts)
+        newest_ts = None
+        async for log in get_job_logs(job.id, args.source, args.instance, last_ts):
+            newest_ts = log.timestamp
+            print(log)
         if not args.follow:
             break
-        if last_seen_ts:
-            last_ts = last_seen_ts
+        if last_ts is None and newest_ts is not None:
+            last_ts = newest_ts
+
         time.sleep(5)
 
 
