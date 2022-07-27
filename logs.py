@@ -17,16 +17,17 @@ class LogRecord(typing.NamedTuple):
     """
     Structured log entry coming out of dataflow.
     """
+
     timestamp: datetime
     source: str
     message: str
     instance: str
 
     def __str__(self):
-        out = f'[{self.timestamp.isoformat()}] [{self.source}'
+        out = f"[{self.timestamp.isoformat()}] [{self.source}"
         if self.instance:
-            out += f':{self.instance}'
-        out += f'] {self.message}'
+            out += f":{self.instance}"
+        out += f"] {self.message}"
         return out
 
 
@@ -34,6 +35,7 @@ class DataFlowJob(typing.NamedTuple):
     """
     Representation of a data flow job
     """
+
     id: str
     creation_time: datetime
     location: str
@@ -42,6 +44,7 @@ class DataFlowJob(typing.NamedTuple):
     state_time: datetime
     type: str
 
+
 async def get_job(name: str) -> DataFlowJob:
     """
     Return job information for job with given dataflow name.
@@ -49,9 +52,16 @@ async def get_job(name: str) -> DataFlowJob:
     Returns None if no such job is present
     """
     cmd = [
-        'gcloud', 'dataflow', 'jobs', 'list', f'--filter=name={name}', '--format=json'
+        "gcloud",
+        "dataflow",
+        "jobs",
+        "list",
+        f"--filter=name={name}",
+        "--format=json",
     ]
-    proc = await asyncio.subprocess.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+    proc = await asyncio.subprocess.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE
+    )
     stdout, _ = await proc.communicate()
     jobs = json.loads(stdout.decode())
     if jobs:
@@ -63,12 +73,17 @@ async def get_job(name: str) -> DataFlowJob:
             name=job["name"],
             state=job["state"],
             state_time=dateparse(job["stateTime"]),
-            type=job["type"]
+            type=job["type"],
         )
     return None
 
 
-async def get_job_logs(job_id, source_filter: typing.List, instance_filter: typing.List, since: datetime=None):
+async def get_job_logs(
+    job_id,
+    source_filter: typing.List,
+    instance_filter: typing.List,
+    since: datetime = None,
+):
     """
     Get logs for given job from given project.
 
@@ -97,51 +112,71 @@ async def get_job_logs(job_id, source_filter: typing.List, instance_filter: typi
     since:
         Show logs only after this timestamp
     """
-    query = [
-        f'resource.labels.job_id="{job_id}"'
-    ]
+    query = [f'resource.labels.job_id="{job_id}"']
     if source_filter:
-        query.append("(" + " OR ".join(
-            f'log_id("dataflow.googleapis.com/{sf}")'
-            for sf in source_filter
-        ) + ")")
+        query.append(
+            "("
+            + " OR ".join(
+                f'log_id("dataflow.googleapis.com/{sf}")' for sf in source_filter
+            )
+            + ")"
+        )
 
     if instance_filter:
         query.append('labels."compute.googleapis.com/resource_type"="instance"')
-        query.append('labels."compute.googleapis.com/resource_name" = (' + " OR ".join(instance_filter) + ")")
+        query.append(
+            'labels."compute.googleapis.com/resource_name" = ('
+            + " OR ".join(instance_filter)
+            + ")"
+        )
     if since:
         query.append(f'timestamp>"{since.isoformat()}"')
-    cmd = ["gcloud", "logging", "read", '\n'.join(query), '--format=json', '--order=asc']
+    cmd = [
+        "gcloud",
+        "logging",
+        "read",
+        "\n".join(query),
+        "--format=json",
+        "--order=asc",
+    ]
     proc = await asyncio.subprocess.create_subprocess_exec(*cmd, stdout=subprocess.PIPE)
     stdout, _ = await proc.communicate()
     logs = json.loads(stdout.decode())
 
     for l in logs:
-        timestamp = isoparse(l['timestamp'])
+        timestamp = isoparse(l["timestamp"])
 
         # logType looks like projects/<project-id>/logs/dataflow.googleapis.com%2F<type>
         # And type is what we ultimately care about
         source = l["logName"].rsplit("%2F", 1)[-1]
 
         # Each log type should be handled differently
-        if source in ('kubelet', 'shuffler', 'harness', 'harness-startup', 'vm-health', 'vm-monitor', 'resource', 'agent') :
-            message = l['jsonPayload']['message']
-        elif source in ('docker', 'system', 'shuffler-startup'):
-            message = l['jsonPayload']['message']
-        elif source in ('job-message'):
-            message = l['textPayload']
-        elif source in ('worker'):
-            payload = l['jsonPayload']
-            message = f'{payload["message"]}'
-        elif source in ('insights',):
+        if source in (
+            "kubelet",
+            "shuffler",
+            "harness",
+            "harness-startup",
+            "vm-health",
+            "vm-monitor",
+            "resource",
+            "agent",
+            "docker",
+            "system",
+            "shuffler-startup",
+            "worker"
+        ):
+            message = l["jsonPayload"]["message"]
+        elif source in ("job-message"):
+            message = l["textPayload"]
+        elif source in ("insights",):
             # Let's ignore these
             continue
         else:
             print(source)
             print(l)
             sys.exit(1)
-        if l['labels'].get('compute.googleapis.com/resource_type') == 'instance':
-            instance = l['labels']['compute.googleapis.com/resource_name']
+        if l["labels"].get("compute.googleapis.com/resource_type") == "instance":
+            instance = l["labels"]["compute.googleapis.com/resource_name"]
         else:
             instance = None
         # Trim additional newlines to prevent excess blank lines
@@ -151,11 +186,11 @@ async def get_job_logs(job_id, source_filter: typing.List, instance_filter: typi
 async def main():
     argparser = argparse.ArgumentParser()
 
-    argparser.add_argument('name')
+    argparser.add_argument("name")
 
-    argparser.add_argument('--source', action='append')
-    argparser.add_argument('--instance', action='append')
-    argparser.add_argument('--follow', '-f', action='store_true')
+    argparser.add_argument("--source", action="append")
+    argparser.add_argument("--instance", action="append")
+    argparser.add_argument("--follow", "-f", action="store_true")
 
     args = argparser.parse_args()
 
