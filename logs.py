@@ -1,89 +1,181 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+"""
+Log message typs!
+"""
 import time
 import argparse
 import subprocess
 import json
-from dateutil.parser import isoparse
+from datetime import datetime
+from dateutil.parser import isoparse, parse as dateparse
 import sys
+import asyncio
+import typing
 
-def get_job(name):
+class LogRecord(typing.NamedTuple):
+    """
+    Structured log entry coming out of dataflow.
+    """
+    timestamp: datetime
+    source: str
+    message: str
+    instance: str
+
+    def __str__(self):
+        out = f'[{self.timestamp.isoformat()}] [{self.source}'
+        if self.instance:
+            out += f':{self.instance}'
+        out += f'] {self.message}'
+        return out
+
+
+class DataFlowJob(typing.NamedTuple):
+    """
+    Representation of a data flow job
+    """
+    id: str
+    creation_time: datetime
+    location: str
+    name: str
+    state: str
+    state_time: datetime
+    type: str
+
+async def get_job(name: str) -> DataFlowJob:
+    """
+    Return job information for job with given dataflow name.
+
+    Returns None if no such job is present
+    """
     cmd = [
         'gcloud', 'dataflow', 'jobs', 'list', f'--filter=name={name}', '--format=json'
     ]
-    output = subprocess.check_output(cmd, encoding='utf-8')
-    jobs = json.loads(output)
+    proc = await asyncio.subprocess.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+    stdout, _ = await proc.communicate()
+    jobs = json.loads(stdout.decode())
     if jobs:
-        return jobs[0]
+        job = jobs[0]
+        return DataFlowJob(
+            id=job["id"],
+            creation_time=dateparse(job["creationTime"]),
+            location=job["location"],
+            name=job["name"],
+            state=job["state"],
+            state_time=dateparse(job["stateTime"]),
+            type=job["type"]
+        )
     return None
 
 
-def get_job_logs(project_id, job_id, log_type_filter, since=None):
+async def get_job_logs(project_id, job_id, source_filter: typing.List, instance_filter: typing.List, since: datetime=None):
+    """
+    Get logs for given job from given project.
+
+    project_id:
+        ID of the GCP project containing the dataflow jobs
+    job_id:
+        ID (not name) of the dataflow job we are looking for logs of
+    source_filter:
+        list of sources we want logs from. Allowed options are:
+
+            - job-message: Messages from dataflow itself
+            - docker: Logs from the docker containers running our workers in dataflow
+            - system: Logs from the VMs running our workers
+            - worker: Logs from the workers themselves, sometimes overlaps with messages from docker
+            - kubelet: Logs from the kubelet on the VMs, responsible for starting up containers
+            - agent: Not sure?
+            - harness-startup: Not sure?
+            - harness: Not sure?
+            - shuffler-startup: Not sure?
+            - shuffler: Not sure?
+            - vm-health: Not sure?
+            - vm-monitor: Not sure?
+            - resource: Not sure?
+            - insights: Not sure?
+        Any combination of these can be provided, and logs from all these sources will be returned
+    instance_filter:
+        list of instance (VM) names we want logs from
+    since:
+        Show logs only after this timestamp
+    """
     query = [
         f'resource.labels.job_id="{job_id}"'
     ]
-    if log_type_filter:
-        query.append(f'logName="projects/{project_id}/logs/dataflow.googleapis.com%2F{log_type_filter}"')
+    if source_filter:
+        query.append("logName = (" + " OR ".join(
+            f'"projects/{project_id}/logs/dataflow.googleapis.com%2F{sf}"'
+            for sf in source_filter
+        ) + ")")
+
+    if instance_filter:
+        query.append('labels."compute.googleapis.com/resource_type"="instance"')
+        query.append('labels."compute.googleapis.com/resource_name" = (' + " OR ".join(instance_filter) + ")")
     if since:
-        query.append(f'timestamp>"{since}"')
+        query.append(f'timestamp>"{since.isoformat()}"')
     cmd = ["gcloud", "logging", "read", '\n'.join(query), '--format=json', '--order=asc']
-    logs = json.loads(subprocess.check_output(cmd))
+    proc = await asyncio.subprocess.create_subprocess_exec(*cmd, stdout=subprocess.PIPE)
+    stdout, _ = await proc.communicate()
+    logs = json.loads(stdout.decode())
+
+    last_seen_ts = None
+
     for l in logs:
-        ts = isoparse(l['timestamp'])
-        print(ts, end=' ')
+        timestamp = isoparse(l['timestamp'])
 
         # logType looks like projects/<project-id>/logs/dataflow.googleapis.com%2F<type>
         # And type is what we ultimately care about
-        log_type = l["logName"].rsplit("%2F", 1)[-1]
-        print(f"[{log_type}] ", end='')
+        source = l["logName"].rsplit("%2F", 1)[-1]
 
         # Each log type should be handled differently
-        if log_type in ('kubelet', 'shuffler', 'harness', 'harness-startup', 'vm-health', 'vm-monitor', 'resource', 'agent') :
+        if source in ('kubelet', 'shuffler', 'harness', 'harness-startup', 'vm-health', 'vm-monitor', 'resource', 'agent') :
             message = l['jsonPayload']['message']
-        elif log_type in ('docker', 'system', 'shuffler-startup'):
+        elif source in ('docker', 'system', 'shuffler-startup'):
             message = l['jsonPayload']['message']
-        elif log_type in ('job-message'):
+        elif source in ('job-message'):
             message = l['textPayload']
-        elif log_type in ('worker'):
+        elif source in ('worker'):
             payload = l['jsonPayload']
             message = f'{payload["message"]}'
-        elif log_type in ('insights',):
+        elif source in ('insights',):
             # Let's ignore these
             continue
         else:
-            print(log_type)
+            print(source)
             print(l)
             sys.exit(1)
         if l['labels'].get('compute.googleapis.com/resource_type') == 'instance':
-            worker = l['labels']['compute.googleapis.com/resource_name']
-            message = f'[node:{worker}] {message}'
+            instance = l['labels']['compute.googleapis.com/resource_name']
+        else:
+            instance = None
+        last_seen_ts = timestamp
         # Trim additional newlines to prevent excess blank lines
-        print(message.rstrip())
+        print(LogRecord(timestamp, source, message.rstrip(), instance))
 
     # Return timestamp of last messag
-    if logs:
-        return logs[-1]['timestamp']
-    else:
-        return since
+    return last_seen_ts
 
-def main():
+async def main():
     argparser = argparse.ArgumentParser()
 
     argparser.add_argument('name')
 
-    argparser.add_argument('--type')
+    argparser.add_argument('--source', action='append')
+    argparser.add_argument('--instance', action='append')
     argparser.add_argument('--follow', '-f', action='store_true')
 
     args = argparser.parse_args()
 
     project = subprocess.check_output(['gcloud', 'config', 'get', 'project'], encoding='utf-8').strip()
-    job = get_job(args.name)
+    job = await get_job(args.name)
     last_ts = None
 
     while True:
-        last_ts = get_job_logs(project, job['id'], args.type, last_ts)
+        last_seen_ts = await get_job_logs(project, job.id, args.source, args.instance, last_ts)
         if not args.follow:
             break
+        if last_seen_ts:
+            last_ts = last_seen_ts
         time.sleep(5)
 
 
-main()
+asyncio.run(main())
