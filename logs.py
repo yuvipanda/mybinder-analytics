@@ -67,12 +67,10 @@ async def get_job(name: str) -> DataFlowJob:
     return None
 
 
-async def get_job_logs(project_id, job_id, source_filter: typing.List, instance_filter: typing.List, since: datetime=None):
+async def get_job_logs(job_id, source_filter: typing.List, instance_filter: typing.List, since: datetime=None):
     """
     Get logs for given job from given project.
 
-    project_id:
-        ID of the GCP project containing the dataflow jobs
     job_id:
         ID (not name) of the dataflow job we are looking for logs of
     source_filter:
@@ -102,8 +100,8 @@ async def get_job_logs(project_id, job_id, source_filter: typing.List, instance_
         f'resource.labels.job_id="{job_id}"'
     ]
     if source_filter:
-        query.append("logName = (" + " OR ".join(
-            f'"projects/{project_id}/logs/dataflow.googleapis.com%2F{sf}"'
+        query.append("(" + " OR ".join(
+            f'log_id("dataflow.googleapis.com/{sf}")'
             for sf in source_filter
         ) + ")")
 
@@ -165,12 +163,11 @@ async def main():
 
     args = argparser.parse_args()
 
-    project = subprocess.check_output(['gcloud', 'config', 'get', 'project'], encoding='utf-8').strip()
     job = await get_job(args.name)
     last_ts = None
 
     while True:
-        last_seen_ts = await get_job_logs(project, job.id, args.source, args.instance, last_ts)
+        last_seen_ts = await get_job_logs(job.id, args.source, args.instance, last_ts)
         if not args.follow:
             break
         if last_seen_ts:
